@@ -7,6 +7,9 @@
 #include <linux/device.h>
 #include <linux/cdev.h>
 #include <linux/errno.h>
+#include <linux/uaccess.h>
+#include <linux/proc_fs.h>
+#include <linux/string.h>
 
 #define MAJOR_N 0
 #define MINOR_N 1
@@ -17,6 +20,8 @@
 static struct class *cl;
 static struct cdev c_dev;
 static dev_t first;
+
+static struct proc_dir_entry* proc_entry;
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Polina");
@@ -41,11 +46,34 @@ static ssize_t my_read(struct file *f, char __user *buf, size_t len, loff_t *off
     return 0;
 }
 
+// off == current reading/writing pos
 static ssize_t my_write(struct file *f, const char __user *buf,  size_t len, loff_t *off)
 {
     pr_info("Driver: write()\n");
     return len;
 }
+
+static ssize_t proc_write(struct file *file, const char __user * ubuf, size_t count, loff_t* ppos)
+{
+    printk(KERN_DEBUG "Attempt to write proc file");
+    return count;
+}
+
+static ssize_t proc_read(struct file *file, char __user * ubuf, size_t count, loff_t* ppos)
+{
+    size_t len = strlen(THIS_MODULE->name);
+    if (*ppos > 0 || count < len)
+    {
+        return 0;
+    }
+    if (copy_to_user(ubuf, THIS_MODULE->name, len) != 0)
+    {
+        return -EFAULT;
+    }
+    *ppos = len;
+    return len;
+}
+
 
 static int my_dev_uevent(struct device *dev, struct kobj_uevent_env *env)
 {
@@ -62,6 +90,10 @@ static struct file_operations fops =
                 .write      = my_write
         };
 
+static struct proc_ops proc_fops = {
+        .proc_read = proc_read,
+        .proc_write = proc_write
+};
 
 static int __init char_mod_init(void)
 {
@@ -97,6 +129,9 @@ static int __init char_mod_init(void)
         unregister_chrdev_region(first, MINOR_N);
         return err;
     }
+
+    proc_entry = proc_create(DEV_NAME, 0444, NULL, &proc_fops);
+    pr_alert("%s: proc file is created\n", THIS_MODULE->name);
     return 0;
 }
 
@@ -107,6 +142,9 @@ static void __exit char_mod_exit(void)
     class_destroy(cl);
     unregister_chrdev_region(first, MINOR_N);
     pr_alert("char driver unregistered\n");
+
+    proc_remove(proc_entry);
+    pr_alert("%s: proc file is deleted\n", THIS_MODULE->name);
 }
 
 module_init(char_mod_init);
