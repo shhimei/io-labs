@@ -20,8 +20,10 @@
 static struct class *cl;
 static struct cdev c_dev;
 static dev_t first;
-
 static struct proc_dir_entry* proc_entry;
+char* buffer;
+size_t buf_size;
+
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Polina");
@@ -43,35 +45,48 @@ static int my_close(struct inode *i, struct file *f)
 static ssize_t my_read(struct file *f, char __user *buf, size_t len, loff_t *off)
 {
     pr_info("Driver: read()\n");
+    pr_info("amount of ever written info into char device: %zu\n", buf_size);
     return 0;
 }
 
-// off == current reading/writing pos
 static ssize_t my_write(struct file *f, const char __user *buf,  size_t len, loff_t *off)
 {
-    pr_info("Driver: write()\n");
+    buffer = (char*) kmalloc(len * sizeof(char), GFP_KERNEL);
+    if ( copy_from_user(buffer, buf, len) ) {
+        return -EFAULT;
+    }
+    buf_size += (strlen(buffer) - 1);
+    pr_info("amount of ever written info: %zu\n", buf_size);
+    pr_info("written info: %s", buffer);
     return len;
 }
 
 static ssize_t proc_write(struct file *file, const char __user * ubuf, size_t count, loff_t* ppos)
 {
-    printk(KERN_DEBUG "Attempt to write proc file");
+    pr_info("attempt to write proc file\n");
     return count;
 }
 
 static ssize_t proc_read(struct file *file, char __user * ubuf, size_t count, loff_t* ppos)
 {
-    size_t len = strlen(THIS_MODULE->name);
-    if (*ppos > 0 || count < len)
+    if (*ppos > 0)
     {
         return 0;
+    } else {
+        pr_info("read file, offset = %d\n", *ppos);
     }
-    if (copy_to_user(ubuf, THIS_MODULE->name, len) != 0)
+
+    pr_info("proc read\n");
+    if (copy_to_user(ubuf, &buf_size, sizeof(buf_size)) != 0)
     {
+        pr_info("fail\n");
         return -EFAULT;
+    } else {
+        *ppos = buf_size;
+        pr_info("amount of ever written info into char device: %zu\n", buf_size);
+        return 1;
     }
-    *ppos = len;
-    return len;
+    return 1;
 }
 
 
@@ -145,6 +160,7 @@ static void __exit char_mod_exit(void)
 
     proc_remove(proc_entry);
     pr_alert("%s: proc file is deleted\n", THIS_MODULE->name);
+    kfree(buffer);
 }
 
 module_init(char_mod_init);
