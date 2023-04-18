@@ -84,10 +84,11 @@ static ssize_t proc_read(struct file *file, char __user * ubuf, size_t count, lo
         pr_info("fail\n");
         return -EFAULT;
     } else {
-        *ppos = buf_size;
+//        *ppos = buf_size;
         pr_info("amount of ever written info into char device: %zu\n", buf_size);
         return 1;
     }
+    *ppos = buf_size;
     return 1;
 }
 
