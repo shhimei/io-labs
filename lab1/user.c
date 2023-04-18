@@ -8,7 +8,7 @@ int main(int argc, char *argv[]) {
     int fd = open(proc_file, O_RDWR);
     if (fd == -1)
     {
-        perror("proc_file already opened\n");
+        perror("proc_file is already open\n");
         return 2;
     }
     size_t size = -1;
@@ -16,5 +16,6 @@ int main(int argc, char *argv[]) {
     if (size != -1) {
         printf("Characters: %zu\n", size);
     }
+    close(fd);
     return 1;
 }

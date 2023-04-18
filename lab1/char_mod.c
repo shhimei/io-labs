@@ -10,6 +10,7 @@
 #include <linux/uaccess.h>
 #include <linux/proc_fs.h>
 #include <linux/string.h>
+#include <linux/mutex.h>
 
 #define MAJOR_N 0
 #define MINOR_N 1
@@ -23,6 +24,7 @@ static dev_t first;
 static struct proc_dir_entry* proc_entry;
 char* buffer;
 size_t buf_size;
+struct mutex my_mutex;
 
 
 MODULE_LICENSE("GPL");
@@ -147,6 +149,8 @@ static int __init char_mod_init(void)
 
     proc_entry = proc_create(DEV_NAME, 0444, NULL, &proc_fops);
     pr_alert("%s: proc file is created\n", THIS_MODULE->name);
+    mutex_init(&my_mutex);
+    mutex_lock(&my_mutex);
     return 0;
 }
 
@@ -161,6 +165,7 @@ static void __exit char_mod_exit(void)
     proc_remove(proc_entry);
     pr_alert("%s: proc file is deleted\n", THIS_MODULE->name);
     kfree(buffer);
+    mutex_unlock(&my_mutex);
 }
 
 module_init(char_mod_init);
