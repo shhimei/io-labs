@@ -71,7 +71,6 @@ static ssize_t proc_read(struct file *file, char __user * ubuf, size_t count, lo
 {
     size_t len = strlen(msg);
     pr_info("proc file read\n");
-    pr_info("len of message: %zu\n", len);
     if (*ppos > 0 || count < len)
     {
         return 0;
@@ -106,6 +105,8 @@ static struct proc_ops proc_fops = {
 
 static int __init char_mod_init(void)
 {
+    mutex_init(&my_mutex);
+    mutex_lock(&my_mutex);
     int err;
     pr_alert("init module registration\n");
     if ( (err = alloc_chrdev_region(&first, MAJOR_N, MINOR_N, DEV_REG_NAME)) < 0 )
@@ -141,8 +142,6 @@ static int __init char_mod_init(void)
 
     proc_entry = proc_create(DEV_NAME, 0444, NULL, &proc_fops);
     pr_alert("%s: proc file is created\n", THIS_MODULE->name);
-    mutex_init(&my_mutex);
-    mutex_lock(&my_mutex);
     return 0;
 }
 

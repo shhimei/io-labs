@@ -20,7 +20,6 @@ int main(int argc, char *argv[]) {
         if (buf[len] == -1) break;
     }
     char dest[len];
-    printf("len of message in user: %zu\n", len);
     memcpy(dest, buf, sizeof(dest));
     printf("%s", dest);
     close(fd);
