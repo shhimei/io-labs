@@ -2,6 +2,7 @@
 #include <stdlib.h>
 #include <unistd.h>
 #include <fcntl.h>
+#include <string.h>
 
 int main(int argc, char *argv[]) {
     char* proc_file = "/proc/var1";
@@ -11,11 +12,17 @@ int main(int argc, char *argv[]) {
         perror("proc_file is already open\n");
         return 2;
     }
-    size_t size = -1;
-    read(fd, &size, sizeof(size));
-    if (size != -1) {
-        printf("Characters: %zu\n", size);
+    char buf[2048];
+    memset(buf, -1, sizeof(buf));
+    read(fd, buf, sizeof(buf));
+    size_t len;
+    for (len = 0; len <= sizeof(buf); len++ ) {
+        if (buf[len] == -1) break;
     }
+    char dest[len];
+    printf("len of message in user: %zu\n", len);
+    memcpy(dest, buf, sizeof(dest));
+    printf("%s", dest);
     close(fd);
     return 1;
 }

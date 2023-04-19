@@ -30,8 +30,8 @@
 
 ## Примеры использования
 
-![img.png](img.png)
+![img_2.png](./imgs/img_2.png)
 
-Кольцевой буфер ядра:
+Кольцевой буфер ядра после команды `cat /dev/var1`:
 
-![img_1.png](img_1.png)
+![img_3.png](./imgs/img_3.png)
