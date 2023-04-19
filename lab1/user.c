@@ -19,9 +19,7 @@ int main(int argc, char *argv[]) {
     for (len = 0; len <= sizeof(buf); len++ ) {
         if (buf[len] == -1) break;
     }
-    char dest[len];
-    memcpy(dest, buf, sizeof(dest));
-    printf("%s", dest);
+    printf("%*.*s", (int) len, (int) len, buf);
     close(fd);
     return 1;
 }

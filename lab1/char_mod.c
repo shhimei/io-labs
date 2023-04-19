@@ -29,6 +29,7 @@ char buf_size_str[32];
 char msg[2048] = "Characters:\n";
 
 struct mutex my_mutex;
+struct mutex proc_mutex;
 
 
 MODULE_LICENSE("GPL");
@@ -39,12 +40,14 @@ MODULE_DESCRIPTION("io-lab1 char-dev-module");
 static int my_open(struct inode *i, struct file *f)
 {
     pr_info("Driver: open()\n");
+    mutex_lock(&my_mutex);
     return 0;
 }
 
 static int my_close(struct inode *i, struct file *f)
 {
     pr_info("Driver: close()\n");
+    mutex_unlock(&my_mutex);
     return 0;
 }
 
@@ -67,7 +70,19 @@ static ssize_t my_write(struct file *f, const char __user *buf,  size_t len, lof
     return len;
 }
 
-static ssize_t proc_read(struct file *file, char __user * ubuf, size_t count, loff_t* ppos)
+static int my_proc_open(struct inode *i, struct file *f)
+{
+    mutex_lock(&proc_mutex);
+    return 0;
+}
+
+static int my_proc_close(struct inode *i, struct file *f)
+{
+    mutex_unlock(&proc_mutex);
+    return 0;
+}
+
+static ssize_t my_proc_read(struct file *file, char __user * ubuf, size_t count, loff_t* ppos)
 {
     size_t len = strlen(msg);
     pr_info("proc file read\n");
@@ -100,13 +115,13 @@ static struct file_operations fops =
         };
 
 static struct proc_ops proc_fops = {
-        .proc_read = proc_read
+        .proc_open = my_proc_open,
+        .proc_release = my_proc_close,
+        .proc_read = my_proc_read
 };
 
 static int __init char_mod_init(void)
 {
-    mutex_init(&my_mutex);
-    mutex_lock(&my_mutex);
     int err;
     pr_alert("init module registration\n");
     if ( (err = alloc_chrdev_region(&first, MAJOR_N, MINOR_N, DEV_REG_NAME)) < 0 )
@@ -142,6 +157,8 @@ static int __init char_mod_init(void)
 
     proc_entry = proc_create(DEV_NAME, 0444, NULL, &proc_fops);
     pr_alert("%s: proc file is created\n", THIS_MODULE->name);
+    mutex_init(&my_mutex);
+    mutex_init(&proc_mutex);
     return 0;
 }
 
@@ -155,7 +172,8 @@ static void __exit char_mod_exit(void)
 
     proc_remove(proc_entry);
     pr_alert("%s: proc file is deleted\n", THIS_MODULE->name);
-    mutex_unlock(&my_mutex);
+    mutex_destroy(&my_mutex);
+    mutex_destroy(&proc_mutex);
 }
 
 module_init(char_mod_init);
