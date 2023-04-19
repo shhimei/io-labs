@@ -9,7 +9,7 @@ build:
 	make -C /lib/modules/$(shell uname -r)/build M=$(PWD) modules
 	gcc -o user user.c
 
-clean:
+clean: remove
 	make -C /lib/modules/$(shell uname -r)/build M=$(PWD) clean
 	${RM} user
 
