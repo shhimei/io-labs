@@ -21,5 +21,5 @@ int main(int argc, char *argv[]) {
     }
     printf("%*.*s", (int) len, (int) len, buf);
     close(fd);
-    return 1;
+    return 0;
 }

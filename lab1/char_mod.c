@@ -95,7 +95,7 @@ static ssize_t my_proc_read(struct file *file, char __user * ubuf, size_t count,
         return -EFAULT;
     }
     *ppos = len;
-    return 1;
+    return len;
 }
 
 
