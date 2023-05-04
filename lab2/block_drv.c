@@ -1,0 +1,375 @@
+#include <linux/bio.h>
+#include <linux/blk-mq.h>
+#include <linux/blkdev.h>
+#include <linux/errno.h>
+#include <linux/fcntl.h>
+#include <linux/fs.h>
+#include <linux/module.h>
+#include <linux/string.h>
+#include <linux/types.h>
+#include <linux/vmalloc.h>
+
+#define MEMSIZE 0x19000 // Size of Ram disk in sectors
+
+
+#define MDISK_SECTOR_SIZE 512
+#define MBR_SIZE SECTOR_SIZE
+#define MBR_DISK_SIGNATURE_OFFSET 440
+#define MBR_DISK_SIGNATURE_SIZE 4
+#define PARTITION_TABLE_OFFSET 446
+#define PARTITION_ENTRY_SIZE 16
+#define PARTITION_TABLE_SIZE 64
+#define MBR_SIGNATURE_OFFSET 510
+#define MBR_SIGNATURE_SIZE 2
+#define MBR_SIGNATURE 0xAA55
+#define BR_SIZE MDISK_SECTOR_SIZE
+#define BR_SIGNATURE_OFFSET 510
+#define BR_SIGNATURE_SIZE 2
+#define BR_SIGNATURE MBR_SIGNATURE
+
+typedef struct
+{
+    unsigned char boot_type; // 0x00 -- inactive, 0x80 -- active
+    unsigned char start_head;
+    unsigned char start_sec:6;
+    unsigned char start_cyl_hi:2;
+    unsigned char start_cyl;
+    unsigned char part_type;
+    unsigned char end_head;
+    unsigned char end_sec:6;
+    unsigned char end_cyl_hi:2;
+    unsigned char end_cyl;
+    unsigned long abs_start_sec;
+    unsigned long sec_in_part;
+} PartEntry;
+
+typedef PartEntry PartTable[4];
+
+#define SEC_PER_HEAD 63
+#define HEAD_PER_CYL 255
+#define HEAD_SIZE (SEC_PER_HEAD * MDISK_SECTOR_SIZE)
+#define CYL_SIZE (SEC_PER_HEAD * HEAD_PER_CYL * MDISK_SECTOR_SIZE)
+
+#define sec4size(s) ((((s) % CYL_SIZE) % HEAD_SIZE) / MDISK_SECTOR_SIZE)
+#define head4size(s) (((s) % CYL_SIZE) / HEAD_SIZE)
+#define cyl4size(s) ((s) / CYL_SIZE)
+
+//#define sec_num_size(s) ((((s)*1048576*8/64)/8)/8)
+
+#define PRIMARY_PART_SEC_NUM 0x4FFF
+#define LOG_PART_SEC_NUM 0x9FFF
+#define EXT_PART_SEC_NUM 0x13FFF
+#define ALL_SEC_NUM 0x18FFF
+
+static PartTable def_part_table =
+        {
+                {
+                        boot_type: 0x00,
+                        start_sec: 0x02,
+                        start_head: 0x0,
+                        start_cyl: 0x0,
+                        part_type: 0x83,
+                        end_head: 0x03,
+                        end_sec: 0x20,
+                        end_cyl: 0x9F,
+                        abs_start_sec: 0x01,
+                        sec_in_part: PRIMARY_PART_SEC_NUM
+                },
+                {
+                        boot_type: 0x00,
+                        start_head: 0x04,
+                        start_sec: 0x1,
+                        start_cyl: 0x0,
+                        part_type: 0x05, // extended partition type
+                        end_head: 0x11,
+                        end_sec: 0x20,
+                        end_cyl: 0x13F,
+                        abs_start_sec: 0x5000,
+                        sec_in_part: 0x14000
+                }
+        };
+
+static unsigned int def_log_part_br_abs_start_sector[] = {0x5000, 0x14000};
+static const PartTable def_log_part_table[] =
+        {
+                {
+                        {
+                                boot_type: 0x00,
+                                start_head: 0x4,
+                                start_sec: 0x2,
+                                start_cyl: 0x0,
+                                part_type: 0x83,
+                                end_head: 0xA,
+                                end_sec: 0x20,
+                                end_cyl: 0x13F,
+                                abs_start_sec: 0x1,
+                                sec_in_part: 0x9FFF
+                        },
+                        {
+                                boot_type: 0x00,
+                                start_head: 0xB,
+                                start_sec: 0x01,
+                                start_cyl: 0x00,
+                                part_type: 0x05,
+                                end_head: 0x11,
+                                end_sec: 0x20,
+                                end_cyl: 0x13F,
+                                abs_start_sec: 0xA000,
+                                sec_in_part: 0xA000
+                        }
+                },
+                {
+                        {
+                                boot_type: 0x00,
+                                start_head: 0xB,
+                                start_sec: 0x02,
+                                start_cyl: 0x00,
+                                part_type: 0x83,
+                                end_head: 0x11,
+                                end_sec: 0x20,
+                                end_cyl: 0x13F,
+                                abs_start_sec: 0x1,
+                                sec_in_part: 0x9FFF
+                        }
+                }
+        };
+
+static void copy_mbr(u8 *disk) {
+    memset(disk, 0x0, MBR_SIZE);
+    *(unsigned long *)(disk + MBR_DISK_SIGNATURE_OFFSET) = 0x36E5756D;
+    memcpy(disk + PARTITION_TABLE_OFFSET, &def_part_table, PARTITION_TABLE_SIZE);
+    *(unsigned short *)(disk + MBR_SIGNATURE_OFFSET) = MBR_SIGNATURE;
+}
+
+static void copy_br(u8 *disk, int abs_start_sector,
+                    const PartTable *part_table) {
+    disk += (abs_start_sector * MDISK_SECTOR_SIZE);
+    memset(disk, 0x0, BR_SIZE);
+    memcpy(disk + PARTITION_TABLE_OFFSET, part_table, PARTITION_TABLE_SIZE);
+    *(unsigned short *)(disk + BR_SIGNATURE_OFFSET) = BR_SIGNATURE;
+}
+
+void copy_mbr_n_br(u8 *disk) {
+    int i;
+    copy_mbr(disk);
+    for (i = 0; i < ARRAY_SIZE(def_log_part_table); ++i)
+        copy_br(disk, def_log_part_br_abs_start_sector[i], &def_log_part_table[i]);
+}
+
+#define MY_BLOCK_MAJOR 0
+#define MY_BLKDEV_NAME "lab2"
+
+static struct lock_class_key sr_bio_compl_lkclass;
+
+ struct my_block_dev {
+    size_t size;
+    u8 *data;
+    atomic_t nr_users;
+//    spinlock_t lock;
+    struct blk_mq_tag_set tag_set;
+    struct request_queue *queue;
+    struct gendisk *gd;
+} device;
+
+static int disk_open(struct block_device *x, fmode_t mode)
+{
+    struct my_block_dev *dev = x->bd_disk->private_data;
+    if (dev == NULL) {
+        pr_warn(MY_BLKDEV_NAME "driver: invalid disk private_data\n");
+        return -ENXIO;
+    }
+
+    atomic_inc(&dev->nr_users);
+    pr_info(MY_BLKDEV_NAME "driver: open \n");
+
+    return 0;
+}
+
+static void disk_release(struct gendisk *disk, fmode_t mode)
+{
+    struct my_block_dev *dev = disk->private_data;
+    if (dev) {
+        atomic_dec(&dev->nr_users);
+        pr_info(MY_BLKDEV_NAME "driver: closed \n");
+    } else
+        pr_warn(MY_BLKDEV_NAME "driver: invalid disk private_data\n");
+}
+
+static struct block_device_operations fops = {
+        .owner = THIS_MODULE,
+        .open = disk_open,
+        .release = disk_release,
+};
+
+int create_disk(void)
+{
+    device.size = MEMSIZE;
+    (device.data) = vmalloc(MEMSIZE * MDISK_SECTOR_SIZE);
+    if (device.data == NULL) {
+        pr_warn(MY_BLKDEV_NAME "driver: vmalloc failure.\n");
+        return -ENOMEM;
+    }
+    /* Load partition table */
+    copy_mbr_n_br(device.data);
+
+    return 0;
+}
+
+static int rb_transfer(struct request *req, unsigned int *nr_bytes) {
+    int dir = rq_data_dir(req);
+    sector_t start_sector = blk_rq_pos(req);
+    unsigned int sector_cnt =
+            blk_rq_sectors(req); /* no of sector on which opn to be done*/
+
+    struct bio_vec bv;
+#define BV_PAGE(bv) ((bv).bv_page)
+#define BV_OFFSET(bv) ((bv).bv_offset)
+#define BV_LEN(bv) ((bv).bv_len)
+
+    struct req_iterator iter;
+    sector_t sector_offset = 0;
+    unsigned int sectors;
+    u8 *buffer;
+
+    rq_for_each_segment(bv, req, iter) {
+        buffer = page_address(BV_PAGE(bv)) + BV_OFFSET(bv);
+        if (BV_LEN(bv) % (MDISK_SECTOR_SIZE) != 0) {
+            pr_err(MY_BLKDEV_NAME
+            ": bio size is not a multiple of sector size\n");
+            return -EIO;
+        }
+
+        sectors = BV_LEN(bv) / MDISK_SECTOR_SIZE;
+        pr_debug(MY_BLKDEV_NAME ": Start Sector: %llu, Sector Offset: %llu; "
+                                    "Buffer: %p; Length: %u sectors\n",
+                (unsigned long long)(start_sector),
+                (unsigned long long)(sector_offset), buffer, sectors);
+
+        if (dir == WRITE) /* Write to the device */
+            memcpy((device.data) +
+                   ((start_sector + sector_offset) * MDISK_SECTOR_SIZE),
+                   buffer, sectors * MDISK_SECTOR_SIZE);
+        else /* Read from the device */
+            memcpy(buffer,
+                   (device.data) +
+                   ((start_sector + sector_offset) * MDISK_SECTOR_SIZE),
+                   sectors * MDISK_SECTOR_SIZE);
+
+        sector_offset += sectors;
+        *nr_bytes += sectors * MDISK_SECTOR_SIZE;
+    }
+
+    if (sector_offset != sector_cnt) {
+        pr_err(MY_BLKDEV_NAME ": bio info doesn't match with the request info");
+        return -EIO;
+    }
+
+    return 0;
+#undef BV_PAGE
+#undef BV_OFFSET
+#undef BV_LEN
+}
+
+
+/* request handling function */
+/**
+ * Changing according to blk multi-queue feature
+ */
+static blk_status_t handle_request(struct blk_mq_hw_ctx *hardware_context,
+                                   const struct blk_mq_queue_data *bd) {
+    blk_status_t status = BLK_STS_OK;
+    unsigned int nr_bytes = 0;
+    struct request *req = bd->rq;
+    switch (rb_transfer(req, &nr_bytes)) {
+        case -EIO: {
+            status = BLK_STS_IOERR;
+        } break;
+        default: {
+            status = BLK_STS_OK;
+        } break;
+    };
+
+    if (blk_update_request(req, status, nr_bytes)) // GPL-only symbol
+        BUG();
+    __blk_mq_end_request(req, status);
+
+    return status;
+}
+
+static struct blk_mq_ops disk_queue_ops = {
+        .queue_rq = handle_request,
+};
+
+ int __init my_block_init(void)
+{
+    int major;
+    major = register_blkdev(MY_BLOCK_MAJOR, MY_BLKDEV_NAME);
+    if (major < 0) {
+        pr_err("unable to register lab2 block device\n");
+        return -EBUSY;
+    }
+    pr_alert("<Major> Number is : %d", major);
+
+    if (create_disk()) {
+        return -ENOMEM;
+    }
+
+    device.tag_set.ops = &disk_queue_ops;
+    device.tag_set.nr_hw_queues = 1;
+    device.tag_set.queue_depth = 128;
+    device.tag_set.numa_node = NUMA_NO_NODE;
+    device.tag_set.cmd_size = sizeof(struct my_block_dev);
+    device.tag_set.flags = BLK_MQ_F_SHOULD_MERGE;
+    device.tag_set.driver_data = &device;
+    if (blk_mq_alloc_tag_set(&(device.tag_set))) {
+        return -ENOMEM;
+    }
+
+    device.queue = blk_mq_init_queue(&(device.tag_set));
+    if (IS_ERR(device.queue)) {
+        blk_mq_free_tag_set(&(device.tag_set));
+        return -ENOMEM;
+    }
+    device.queue->queuedata = &device;
+    device.gd = alloc_disk(device.queue);
+
+    if (!device.gd) {
+        pr_info(MY_BLKDEV_NAME ": alloc_disk failure\n");
+        return -EBUSY;
+    }
+
+    device.gd->minors = 7;
+    (device.gd)->major = major;
+    device.gd->first_minor = 0;
+
+    device.gd->fops = &fops;
+    device.gd->private_data = &device;
+    device.gd->queue = device.queue;
+    pr_info("THIS IS DEVICE SIZE %zu", device.size);
+    snprintf(((device.gd)->disk_name), DISK_NAME_LEN, MY_BLKDEV_NAME);
+
+    set_capacity(device.gd, device.size);
+
+    add_disk(device.gd);
+    return 0;
+}
+
+void __exit my_block_exit(void)
+{
+    del_gendisk(device.gd);
+    put_disk(device.gd);
+
+    blk_cleanup_queue(device.queue);
+    blk_mq_free_tag_set(&(device.tag_set));
+
+    // cleanup device buffer in ram
+    vfree(device.data);
+    unregister_blkdev(MY_BLOCK_MAJOR, MY_BLKDEV_NAME);
+}
+
+module_init(my_block_init);
+module_exit(my_block_exit);
+
+MODULE_LICENSE("GPL");
+MODULE_AUTHOR("Polina");
+MODULE_DESCRIPTION("BLOCK DRIVER");
