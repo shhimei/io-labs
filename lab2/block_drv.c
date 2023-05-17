@@ -4,16 +4,20 @@
 #include <linux/errno.h>
 #include <linux/fcntl.h>
 #include <linux/fs.h>
+#include <linux/genhd.h>
 #include <linux/module.h>
 #include <linux/string.h>
 #include <linux/types.h>
 #include <linux/vmalloc.h>
 
+#define DISK_NAME "vramdisk"
+
 #define MEMSIZE 0x19000 // Size of Ram disk in sectors
 
+int major = 0; // Variable for Major Number
 
 #define MDISK_SECTOR_SIZE 512
-#define MBR_SIZE SECTOR_SIZE
+#define MBR_SIZE MDISK_SECTOR_SIZE
 #define MBR_DISK_SIGNATURE_OFFSET 440
 #define MBR_DISK_SIGNATURE_SIZE 4
 #define PARTITION_TABLE_OFFSET 446
@@ -25,25 +29,26 @@
 #define BR_SIZE MDISK_SECTOR_SIZE
 #define BR_SIGNATURE_OFFSET 510
 #define BR_SIGNATURE_SIZE 2
-#define BR_SIGNATURE MBR_SIGNATURE
+#define BR_SIGNATURE 0xAA55
 
-typedef struct
-{
-    unsigned char boot_type; // 0x00 -- inactive, 0x80 -- active
+typedef struct {
+    unsigned char boot_type; // 0x00 - Inactive; 0x80 - Active (Bootable)
     unsigned char start_head;
-    unsigned char start_sec:6;
-    unsigned char start_cyl_hi:2;
+    unsigned char start_sec : 6;
+    unsigned char start_cyl_hi : 2;
     unsigned char start_cyl;
     unsigned char part_type;
     unsigned char end_head;
-    unsigned char end_sec:6;
-    unsigned char end_cyl_hi:2;
+    unsigned char end_sec : 6;
+    unsigned char end_cyl_hi : 2;
     unsigned char end_cyl;
-    unsigned long abs_start_sec;
-    unsigned long sec_in_part;
+    unsigned int abs_start_sec;
+    unsigned int sec_in_part;
 } PartEntry;
 
 typedef PartEntry PartTable[4];
+
+static struct lock_class_key sr_bio_compl_lkclass;
 
 #define SEC_PER_HEAD 63
 #define HEAD_PER_CYL 255
@@ -54,42 +59,35 @@ typedef PartEntry PartTable[4];
 #define head4size(s) (((s) % CYL_SIZE) / HEAD_SIZE)
 #define cyl4size(s) ((s) / CYL_SIZE)
 
-//#define sec_num_size(s) ((((s)*1048576*8/64)/8)/8)
-
-#define PRIMARY_PART_SEC_NUM 0x4FFF
-#define LOG_PART_SEC_NUM 0x9FFF
-#define EXT_PART_SEC_NUM 0x13FFF
-#define ALL_SEC_NUM 0x18FFF
-
 static PartTable def_part_table =
         {
                 {
                         boot_type: 0x00,
-                        start_sec: 0x02,
+                        start_sec: 0x2,
                         start_head: 0x0,
                         start_cyl: 0x0,
                         part_type: 0x83,
-                        end_head: 0x03,
+                        end_head: 0x3,
                         end_sec: 0x20,
                         end_cyl: 0x9F,
-                        abs_start_sec: 0x01,
-                        sec_in_part: PRIMARY_PART_SEC_NUM
+                        abs_start_sec: 0x1,
+                        sec_in_part: 0x4FFF // 10Mbyte
                 },
                 {
                         boot_type: 0x00,
-                        start_head: 0x04,
+                        start_head: 0x4,
                         start_sec: 0x1,
                         start_cyl: 0x0,
                         part_type: 0x05, // extended partition type
-                        end_head: 0x11,
                         end_sec: 0x20,
-                        end_cyl: 0x13F,
+                        end_head: 0x13,
+                        end_cyl: 0x9F,
                         abs_start_sec: 0x5000,
-                        sec_in_part: 0x14000
+                        sec_in_part: 0x14000 // 40 Mbyte
                 }
         };
 
-static unsigned int def_log_part_br_abs_start_sector[] = {0x5000, 0x14000};
+static unsigned int def_log_part_br_abs_start_sector[] = {0x5000, 0xF000};
 static const PartTable def_log_part_table[] =
         {
                 {
@@ -99,21 +97,21 @@ static const PartTable def_log_part_table[] =
                                 start_sec: 0x2,
                                 start_cyl: 0x0,
                                 part_type: 0x83,
-                                end_head: 0xA,
+                                end_head: 0xB,
                                 end_sec: 0x20,
-                                end_cyl: 0x13F,
+                                end_cyl: 0x9F,
                                 abs_start_sec: 0x1,
                                 sec_in_part: 0x9FFF
                         },
                         {
                                 boot_type: 0x00,
-                                start_head: 0xB,
+                                start_head: 0x8,
                                 start_sec: 0x01,
                                 start_cyl: 0x00,
                                 part_type: 0x05,
-                                end_head: 0x11,
+                                end_head: 0xB,
                                 end_sec: 0x20,
-                                end_cyl: 0x13F,
+                                end_cyl: 0x9F,
                                 abs_start_sec: 0xA000,
                                 sec_in_part: 0xA000
                         }
@@ -121,13 +119,13 @@ static const PartTable def_log_part_table[] =
                 {
                         {
                                 boot_type: 0x00,
-                                start_head: 0xB,
+                                start_head: 0x8,
                                 start_sec: 0x02,
                                 start_cyl: 0x00,
                                 part_type: 0x83,
-                                end_head: 0x11,
+                                end_head: 0xF,
                                 end_sec: 0x20,
-                                end_cyl: 0x13F,
+                                end_cyl: 0x9F,
                                 abs_start_sec: 0x1,
                                 sec_in_part: 0x9FFF
                         }
@@ -156,59 +154,53 @@ void copy_mbr_n_br(u8 *disk) {
         copy_br(disk, def_log_part_br_abs_start_sector[i], &def_log_part_table[i]);
 }
 
-#define MY_BLOCK_MAJOR 0
-#define MY_BLKDEV_NAME "lab2"
-
-static struct lock_class_key sr_bio_compl_lkclass;
-
- struct my_block_dev {
+/* Structure associated with Block device*/
+struct vram_disk_device {
     size_t size;
     u8 *data;
     atomic_t nr_users;
-//    spinlock_t lock;
+    // spinlock_t lock;
     struct blk_mq_tag_set tag_set;
     struct request_queue *queue;
     struct gendisk *gd;
 } device;
 
-static int disk_open(struct block_device *x, fmode_t mode)
-{
-    struct my_block_dev *dev = x->bd_disk->private_data;
+static int vramdisk_open(struct block_device *x, fmode_t mode) {
+    struct vram_disk_device *dev = x->bd_disk->private_data;
     if (dev == NULL) {
-        pr_warn(MY_BLKDEV_NAME "driver: invalid disk private_data\n");
+        pr_warn(DISK_NAME "driver: invalid disk private_data\n");
         return -ENXIO;
     }
 
     atomic_inc(&dev->nr_users);
-    pr_info(MY_BLKDEV_NAME "driver: open \n");
+    pr_info(DISK_NAME "driver: open \n");
 
     return 0;
 }
 
-static void disk_release(struct gendisk *disk, fmode_t mode)
-{
-    struct my_block_dev *dev = disk->private_data;
+static void vramdisk_release(struct gendisk *disk, fmode_t mode) {
+    struct vram_disk_device *dev = disk->private_data;
     if (dev) {
         atomic_dec(&dev->nr_users);
-        pr_info(MY_BLKDEV_NAME "driver: closed \n");
+        pr_info(DISK_NAME "driver: closed \n");
     } else
-        pr_warn(MY_BLKDEV_NAME "driver: invalid disk private_data\n");
+        pr_warn(DISK_NAME "driver: invalid disk private_data\n");
 }
 
 static struct block_device_operations fops = {
         .owner = THIS_MODULE,
-        .open = disk_open,
-        .release = disk_release,
+        .open = vramdisk_open,
+        .release = vramdisk_release,
 };
 
-int create_disk(void)
-{
+int vramdisk_init(void) {
     device.size = MEMSIZE;
     (device.data) = vmalloc(MEMSIZE * MDISK_SECTOR_SIZE);
     if (device.data == NULL) {
-        pr_warn(MY_BLKDEV_NAME "driver: vmalloc failure.\n");
+        pr_warn(DISK_NAME "driver: vmalloc failure.\n");
         return -ENOMEM;
     }
+
     /* Load partition table */
     copy_mbr_n_br(device.data);
 
@@ -234,13 +226,12 @@ static int rb_transfer(struct request *req, unsigned int *nr_bytes) {
     rq_for_each_segment(bv, req, iter) {
         buffer = page_address(BV_PAGE(bv)) + BV_OFFSET(bv);
         if (BV_LEN(bv) % (MDISK_SECTOR_SIZE) != 0) {
-            pr_err(MY_BLKDEV_NAME
-            ": bio size is not a multiple of sector size\n");
+            pr_err(DISK_NAME ": bio size is not a multiple of sector size\n");
             return -EIO;
         }
 
         sectors = BV_LEN(bv) / MDISK_SECTOR_SIZE;
-        pr_debug(MY_BLKDEV_NAME ": Start Sector: %llu, Sector Offset: %llu; "
+        pr_debug(DISK_NAME ": Start Sector: %llu, Sector Offset: %llu; "
                                     "Buffer: %p; Length: %u sectors\n",
                 (unsigned long long)(start_sector),
                 (unsigned long long)(sector_offset), buffer, sectors);
@@ -260,7 +251,7 @@ static int rb_transfer(struct request *req, unsigned int *nr_bytes) {
     }
 
     if (sector_offset != sector_cnt) {
-        pr_err(MY_BLKDEV_NAME ": bio info doesn't match with the request info");
+        pr_err(DISK_NAME ": bio info doesn't match with the request info");
         return -EIO;
     }
 
@@ -269,7 +260,6 @@ static int rb_transfer(struct request *req, unsigned int *nr_bytes) {
 #undef BV_OFFSET
 #undef BV_LEN
 }
-
 
 /* request handling function */
 /**
@@ -296,29 +286,31 @@ static blk_status_t handle_request(struct blk_mq_hw_ctx *hardware_context,
     return status;
 }
 
-static struct blk_mq_ops disk_queue_ops = {
+static struct blk_mq_ops vram_queue_ops = {
         .queue_rq = handle_request,
 };
 
- int __init my_block_init(void)
-{
-    int major;
-    major = register_blkdev(MY_BLOCK_MAJOR, MY_BLKDEV_NAME);
-    if (major < 0) {
-        pr_err("unable to register lab2 block device\n");
+int device_setup(void) {
+
+    /* Register block device */
+    major = register_blkdev(major, DISK_NAME); // major no. allocation
+
+    if (major <= 0) {
+        pr_err(" unable to get major number\n");
         return -EBUSY;
     }
-    pr_alert("<Major> Number is : %d", major);
 
-    if (create_disk()) {
+    pr_alert("Major Number is : %d", major);
+
+    if (vramdisk_init()) {
         return -ENOMEM;
     }
 
-    device.tag_set.ops = &disk_queue_ops;
+    device.tag_set.ops = &vram_queue_ops;
     device.tag_set.nr_hw_queues = 1;
     device.tag_set.queue_depth = 128;
     device.tag_set.numa_node = NUMA_NO_NODE;
-    device.tag_set.cmd_size = sizeof(struct my_block_dev);
+    device.tag_set.cmd_size = sizeof(struct vram_disk_device);
     device.tag_set.flags = BLK_MQ_F_SHOULD_MERGE;
     device.tag_set.driver_data = &device;
     if (blk_mq_alloc_tag_set(&(device.tag_set))) {
@@ -331,22 +323,24 @@ static struct blk_mq_ops disk_queue_ops = {
         return -ENOMEM;
     }
     device.queue->queuedata = &device;
-    device.gd = alloc_disk(device.queue);
+
+    /* Initialize gendisk */
+    device.gd = __alloc_disk_node(device.queue, 7, &sr_bio_compl_lkclass);
 
     if (!device.gd) {
-        pr_info(MY_BLKDEV_NAME ": alloc_disk failure\n");
+        printk(KERN_INFO DISK_NAME ": alloc_disk failure\n");
         return -EBUSY;
     }
 
     device.gd->minors = 7;
-    (device.gd)->major = major;
-    device.gd->first_minor = 0;
+    (device.gd)->major = major; // major no to gendisk
+    device.gd->first_minor = 0; // first minor of gendisk
 
     device.gd->fops = &fops;
     device.gd->private_data = &device;
     device.gd->queue = device.queue;
     pr_info("THIS IS DEVICE SIZE %zu", device.size);
-    snprintf(((device.gd)->disk_name), DISK_NAME_LEN, MY_BLKDEV_NAME);
+    snprintf(((device.gd)->disk_name), DISK_NAME_LEN, DISK_NAME);
 
     set_capacity(device.gd, device.size);
 
@@ -354,8 +348,15 @@ static struct blk_mq_ops disk_queue_ops = {
     return 0;
 }
 
-void __exit my_block_exit(void)
-{
+static int __init vramdisk_drive_init(void) {
+    int ret = 0;
+    ret = device_setup();
+    return ret;
+}
+
+void vramdisk_cleanup(void) { vfree(device.data); }
+
+void __exit vramdisk_drive_exit(void) {
     del_gendisk(device.gd);
     put_disk(device.gd);
 
@@ -363,13 +364,13 @@ void __exit my_block_exit(void)
     blk_mq_free_tag_set(&(device.tag_set));
 
     // cleanup device buffer in ram
-    vfree(device.data);
-    unregister_blkdev(MY_BLOCK_MAJOR, MY_BLKDEV_NAME);
+    vramdisk_cleanup();
+
+    unregister_blkdev(major, DISK_NAME);
 }
 
-module_init(my_block_init);
-module_exit(my_block_exit);
-
-MODULE_LICENSE("GPL");
+module_init(vramdisk_drive_init);
+module_exit(vramdisk_drive_exit);
+MODULE_LICENSE("Dual MIT/GPL");
 MODULE_AUTHOR("Polina");
 MODULE_DESCRIPTION("BLOCK DRIVER");
