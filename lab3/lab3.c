@@ -7,6 +7,8 @@
 #include <net/arp.h>
 #include <linux/ip.h>
 #include <linux/udp.h>
+#include <linux/proc_fs.h>
+
 
 static char* link = "enp0s3";
 module_param(link, charp, 0);
@@ -21,31 +23,48 @@ struct priv {
     struct net_device *parent;
 };
 
+
+static struct proc_dir_entry *entry;
+int count_got = 0;
+static char saddr[STANDART_SIZE][32];
+static char daddr[STANDART_SIZE][32];
+static int lens_got[STANDART_SIZE];
+static int protocols[STANDART_SIZE];
+
 static char check_frame(struct sk_buff *skb, unsigned char data_shift) {
     unsigned char *user_data_ptr = NULL;
     struct iphdr *ip = (struct iphdr *)skb_network_header(skb);
-    struct udphdr *udp = NULL;
+
+
     int data_len = 0;
-
-    if (IPPROTO_UDP == ip->protocol) {
-        udp = (struct udphdr*)((unsigned char*)ip + (ip->ihl * 4));
-        data_len = ntohs(udp->len) - sizeof(struct udphdr);
-        user_data_ptr = (unsigned char *)(skb->data + sizeof(struct iphdr)  + sizeof(struct udphdr)) + data_shift;
+    data_len = ntohs(ip->tot_len);
+    if (data_len <= 70){
+        user_data_ptr = (unsigned char *)(skb->data + sizeof(struct iphdr)) + data_shift;
         memcpy(data, user_data_ptr, data_len);
-        data[data_len] = '\0';
-
-        printk("Captured UDP datagram, saddr: %d.%d.%d.%d\n",
+        data[data_len] = '\n';
+        data[data_len + 1] = '\0';
+        printk("Captured saddr: %d.%d.%d.%d\n",
                ntohl(ip->saddr) >> 24, (ntohl(ip->saddr) >> 16) & 0x00FF,
                (ntohl(ip->saddr) >> 8) & 0x0000FF, (ntohl(ip->saddr)) & 0x000000FF);
         printk("daddr: %d.%d.%d.%d\n",
                ntohl(ip->daddr) >> 24, (ntohl(ip->daddr) >> 16) & 0x00FF,
                (ntohl(ip->daddr) >> 8) & 0x0000FF, (ntohl(ip->daddr)) & 0x000000FF);
 
-        printk(KERN_INFO "Data length: %d. Data:", data_len);
-        printk("%s", data);
-        return 1;
+        printk(KERN_INFO "Package full length: %d\n", data_len);
+        printk("Data: %s", data);
+        printk("Protocol_type: %d", ip->protocol);
+        sprintf(saddr[count_got],"%d.%d.%d.%d", ntohl(ip->saddr) >> 24, (ntohl(ip->saddr) >> 16) & 0x00FF,
+                (ntohl(ip->saddr) >> 8) & 0x0000FF, (ntohl(ip->saddr)) & 0x000000FF);
+        sprintf(daddr[count_got], "%d.%d.%d.%d", ntohl(ip->daddr) >> 24, (ntohl(ip->daddr) >> 16) & 0x00FF,
+                (ntohl(ip->daddr) >> 8) & 0x0000FF, (ntohl(ip->daddr)) & 0x000000FF);
+        lens_got[count_got] = data_len;
+        count_got = (count_got + 1) % STANDART_SIZE;
 
+        return 1;
+    } else {
+        return 0;
     }
+
     return 0;
 }
 
@@ -166,8 +185,9 @@ void __exit vni_exit(void) {
 module_init(vni_init);
 module_exit(vni_exit);
 
-MODULE_AUTHOR("Polina, Misha");
+MODULE_AUTHOR("Author");
 MODULE_LICENSE("GPL");
 MODULE_DESCRIPTION("Description");
+
 
 
