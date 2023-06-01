@@ -10,7 +10,9 @@
 #include <linux/proc_fs.h>
 
 
-static char* link = "enp0s3";
+#define STANDART_SIZE 1000
+
+static char* link = "wlp1s0";
 module_param(link, charp, 0);
 
 static char* ifname = "vni%d";
@@ -38,7 +40,7 @@ static char check_frame(struct sk_buff *skb, unsigned char data_shift) {
 
     int data_len = 0;
     data_len = ntohs(ip->tot_len);
-    if (data_len <= 70){
+    if (skb->dev && data_len <= 70){
         user_data_ptr = (unsigned char *)(skb->data + sizeof(struct iphdr)) + data_shift;
         memcpy(data, user_data_ptr, data_len);
         data[data_len] = '\n';
@@ -58,8 +60,11 @@ static char check_frame(struct sk_buff *skb, unsigned char data_shift) {
         sprintf(daddr[count_got], "%d.%d.%d.%d", ntohl(ip->daddr) >> 24, (ntohl(ip->daddr) >> 16) & 0x00FF,
                 (ntohl(ip->daddr) >> 8) & 0x0000FF, (ntohl(ip->daddr)) & 0x000000FF);
         lens_got[count_got] = data_len;
+        protocols[count_got] = ip->protocol;
+
         count_got = (count_got + 1) % STANDART_SIZE;
 
+        printk("-----------------------------\n");
         return 1;
     } else {
         return 0;
@@ -129,6 +134,36 @@ static void setup(struct net_device *dev) {
         dev->dev_addr[i] = (char)i;
 }
 
+static ssize_t my_proc_read(struct file *file, char __user * buf, size_t count, loff_t* ppos)
+{
+    int k = 0;
+    char data[4096];
+    int i ;
+
+    if (count_got > 0) {
+    for (i = 0; i < count_got; i++) {
+        k += sprintf(&data[k], "SADDR: %s\nDADDR: %s\nPROTOCOL: %d\nSIZE: %d\n ----------------------\n", saddr[i], daddr[i], protocols[i], lens_got[i]);
+    }
+    } else {
+        k += sprintf(data, "No packets\n");
+    }
+    data[k++] = '\0';
+    if (copy_to_user(buf, data, k) != 0)
+    {
+        pr_info("error copy_to user\n");
+        return -EFAULT;
+    }
+    if (*ppos > 0 || count < k) {
+        return 0;
+    }
+    *ppos += k;
+    return k;
+}
+
+static struct proc_ops proc_fops = {
+        .proc_read = my_proc_read
+};
+
 int __init vni_init(void) {
     int err = 0;
     struct priv *priv;
@@ -163,6 +198,7 @@ int __init vni_init(void) {
     rtnl_lock();
     netdev_rx_handler_register(priv->parent, &handle_frame, NULL);
     rtnl_unlock();
+    entry = proc_create("var5", 0444, NULL, &proc_fops);
     printk(KERN_INFO "Module %s loaded", THIS_MODULE->name);
     printk(KERN_INFO "%s: create link %s", THIS_MODULE->name, child->name);
     printk(KERN_INFO "%s: registered rx handler for %s", THIS_MODULE->name, priv->parent->name);
@@ -179,6 +215,7 @@ void __exit vni_exit(void) {
     }
     unregister_netdev(child);
     free_netdev(child);
+    proc_remove(entry);
     printk(KERN_INFO "Module %s unloaded", THIS_MODULE->name);
 }
 
@@ -188,6 +225,3 @@ module_exit(vni_exit);
 MODULE_AUTHOR("Author");
 MODULE_LICENSE("GPL");
 MODULE_DESCRIPTION("Description");
-
-
-
